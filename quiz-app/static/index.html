@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quiz</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #667085; --border: #dfe3ea;
+    --accent: #2f6fed; --ok: #1f9d55; --ok-bg: #e8f7ee; --bad: #d64545; --bad-bg: #fdecec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e6e9ef; --muted: #98a2b3; --border: #2c3340;
+      --accent: #6b9bff; --ok: #4cc38a; --ok-bg: #16301f; --bad: #f07070; --bad-bg: #361b1b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 780px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .stat b { display: block; font-size: 1.6rem; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--card); color: var(--text);
+           padding: 10px 18px; border-radius: 8px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .progress { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 8px 0 16px; }
+  .progress > div { height: 100%; background: var(--accent); transition: width .2s; }
+  .tag { display: inline-block; font-size: .8rem; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); }
+  .qtext { font-size: 1.08rem; margin: 12px 0 16px; }
+  .option { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--border);
+            border-radius: 8px; margin-bottom: 8px; cursor: pointer; }
+  .option input { margin-top: 4px; }
+  .option.correct { border-color: var(--ok); background: var(--ok-bg); }
+  .option.wrong { border-color: var(--bad); background: var(--bad-bg); }
+  .option.locked { cursor: default; }
+  .letter { font-weight: 600; min-width: 1.2em; }
+  .feedback { margin-top: 16px; padding: 14px; border-radius: 8px; }
+  .feedback.ok { background: var(--ok-bg); } .feedback.bad { background: var(--bad-bg); }
+  .feedback a { color: var(--accent); word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  .review-item { border-top: 1px solid var(--border); padding: 12px 0; }
+  .error { color: var(--bad); }
+  .success { color: var(--ok); }
+  @media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr 1fr; } .stat b { font-size: 1.2rem; } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+const app = document.getElementById('app');
+let state = null;     // current attempt state from the server
+let current = 0;      // index of question being shown
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const linkify = s => esc(s).replace(/(https?:\/\/[^\s;]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+async function api(path, body) {
+  let res;
+  try {
+    res = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  } catch (e) {
+    throw new Error('Cannot reach the quiz server. Run "python3 app.py" and open http://127.0.0.1:5050');
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+async function home(msg, ok) {
+  const s = await api('/api/status');
+  state = s.active_attempt;
+  const st = s.stats;
+  const resumable = state && state.questions.some(q => !q.selected);
+  app.innerHTML = `
+    <h1>Quiz</h1>
+    <div class="card">
+      <div class="stats">
+        <div class="stat"><b>${st.total}</b><span class="muted">Total questions</span></div>
+        <div class="stat"><b>${st.answered}</b><span class="muted">Answered</span></div>
+        <div class="stat"><b>${st.remaining}</b><span class="muted">Remaining</span></div>
+      </div>
+      <div class="progress"><div style="width:${st.total ? st.answered / st.total * 100 : 0}%"></div></div>
+      ${msg ? `<p class="${ok ? 'success' : 'error'}">${esc(msg)}</p>` : ''}
+      <div class="row">
+        ${resumable ? `<button class="primary" id="resume">Resume quiz</button>` : ''}
+        <button class="${resumable ? '' : 'primary'}" id="start" ${st.remaining ? '' : 'disabled'}>
+          Start new quiz (${Math.min(20, st.remaining)} questions)</button>
+        <button id="reset">Reset progress</button>
+      </div>
+      ${st.remaining === 0 ? '<p class="muted">You have answered every question. Reset progress to go again.</p>' : ''}
+    </div>
+    ${s.history.length ? `<div class="card"><b>Recent quizzes</b>
+      <table><tr><th>Date</th><th>Score</th></tr>
+      ${s.history.map(h => `<tr><td>${esc(h.started_at.replace('T', ' '))}</td>
+        <td>${h.score ?? 0} / ${h.answered}</td></tr>`).join('')}</table></div>` : ''}`;
+  if (resumable) document.getElementById('resume').onclick = () => {
+    current = state.questions.findIndex(q => !q.selected); renderQuestion(); };
+  document.getElementById('start').onclick = async () => {
+    try { state = await api('/api/quiz', {}); current = 0; renderQuestion(); }
+    catch (e) { home(e.message); }
+  };
+  // Inline two-step confirm; window.confirm() is blocked in some embedded browsers.
+  const resetBtn = document.getElementById('reset');
+  resetBtn.onclick = async () => {
+    if (!resetBtn.dataset.armed) {
+      resetBtn.dataset.armed = '1';
+      resetBtn.textContent = 'Click again to confirm reset';
+      resetBtn.style.borderColor = 'var(--bad)';
+      resetBtn.style.color = 'var(--bad)';
+      setTimeout(() => {
+        if (!resetBtn.isConnected) return;
+        delete resetBtn.dataset.armed;
+        resetBtn.textContent = 'Reset progress';
+        resetBtn.style.borderColor = resetBtn.style.color = '';
+      }, 4000);
+      return;
+    }
+    try { await api('/api/reset', {}); home('Progress reset. All questions are available again.', true); }
+    catch (e) { home(e.message); }
+  };
+}
+
+function renderQuestion() {
+  const q = state.questions[current];
+  const n = state.questions.length;
+  const done = !!q.selected;
+  const type = q.multi ? 'checkbox' : 'radio';
+  const score = state.questions.filter(x => x.is_correct).length;
+  app.innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <span class="muted">Question ${current + 1} of ${n}</span>
+      <span class="muted">Score: ${score}</span>
+    </div>
+    <div class="progress"><div style="width:${(current + (done ? 1 : 0)) / n * 100}%"></div></div>
+    <div class="card">
+      <span class="tag">${esc(q.domain)}</span>
+      <div class="qtext">${esc(q.question)}</div>
+      ${q.multi ? '<p class="muted">Select two answers.</p>' : ''}
+      <form id="f">
+        ${Object.entries(q.answers).map(([k, v]) => {
+          let cls = done ? 'locked' : '';
+          if (done && q.correct.includes(k)) cls += ' correct';
+          else if (done && q.selected.includes(k)) cls += ' wrong';
+          return `<label class="option ${cls}">
+            <input type="${type}" name="a" value="${k}" ${done ? 'disabled' : ''} ${done && q.selected.includes(k) ? 'checked' : ''}>
+            <span class="letter">${k}.</span><span>${esc(v)}</span></label>`;
+        }).join('')}
+      </form>
+      ${done ? `<div class="feedback ${q.is_correct ? 'ok' : 'bad'}">
+          <b>${q.is_correct ? 'Correct!' : `Incorrect — answer: ${q.correct.join(', ')}`}</b>
+          <p style="margin:8px 0 0">${linkify(q.explanation)}</p></div>` : ''}
+      <p class="error" id="err"></p>
+      <div class="row">
+        ${done
+          ? `<button class="primary" id="next">${current + 1 < n ? 'Next question' : 'See results'}</button>`
+          : `<button class="primary" id="submit">Submit answer</button>`}
+        <button id="quit">Back to home</button>
+      </div>
+    </div>`;
+  document.getElementById('quit').onclick = () => home();
+  if (done) {
+    document.getElementById('next').onclick = () => {
+      const next = state.questions.findIndex((x, i) => i > current && !x.selected);
+      if (next >= 0) { current = next; renderQuestion(); } else finish();
+    };
+  } else {
+    document.getElementById('submit').onclick = submit;
+  }
+}
+
+async function submit() {
+  const q = state.questions[current];
+  const selected = [...document.querySelectorAll('#f input:checked')].map(i => i.value);
+  const err = document.getElementById('err');
+  if (!selected.length) { err.textContent = 'Please select an answer.'; return; }
+  if (q.multi && selected.length !== 2) { err.textContent = 'Please select exactly two answers.'; return; }
+  try {
+    state = await api(`/api/quiz/${state.attempt_id}/answer`, {position: q.position, selected});
+    renderQuestion();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function finish() {
+  state = await api(`/api/quiz/${state.attempt_id}/finish`, {});
+  const qs = state.questions;
+  const score = qs.filter(q => q.is_correct).length;
+  const byDomain = {};
+  qs.forEach(q => {
+    const d = byDomain[q.domain] ||= {right: 0, total: 0};
+    d.total++; if (q.is_correct) d.right++;
+  });
+  const wrong = qs.filter(q => q.selected && !q.is_correct);
+  app.innerHTML = `
+    <h1>Results</h1>
+    <div class="card">
+      <div class="stat"><b>${score} / ${qs.length} (${Math.round(score / qs.length * 100)}%)</b></div>
+      <table style="margin-top:12px"><tr><th>Domain</th><th>Score</th></tr>
+        ${Object.entries(byDomain).sort().map(([d, v]) => `<tr><td>${esc(d)}</td><td>${v.right} / ${v.total}</td></tr>`).join('')}
+      </table>
+      <p class="muted">${state.stats.remaining} unanswered questions left in the pool.</p>
+      <div class="row"><button class="primary" id="home">Back to home</button></div>
+    </div>
+    ${wrong.length ? `<div class="card"><b>Review incorrect answers</b>
+      ${wrong.map(q => `<div class="review-item">
+        <div>${esc(q.question)}</div>
+        <p class="muted" style="margin:6px 0">Your answer: ${q.selected.join(', ')} — Correct: ${q.correct.join(', ')}
+          (${q.correct.map(k => esc(q.answers[k])).join(' / ')})</p>
+        <div>${linkify(q.explanation)}</div></div>`).join('')}</div>` : ''}`;
+  document.getElementById('home').onclick = () => home();
+}
+
+home().catch(e => { app.innerHTML = `<h1>Quiz</h1><div class="card"><p class="error">${esc(e.message)}</p></div>`; });
+</script>
+</body>
+</html>
